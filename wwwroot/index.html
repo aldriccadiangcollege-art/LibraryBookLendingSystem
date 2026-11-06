@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library Book Lending System – MBASH Unit I</title>
+<style>
+:root{--bg:#eef1f6;--card:#fff;--ink:#1b2540;--muted:#5d6885;--primary:#2a4a8d;--line:#cfd6e4;--bad:#a8322d;--good:#1f6b4a;--warn:#8a5a00}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+header{background:var(--ink);color:#fff;padding:14px 24px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
+h1{font:600 20px/1.2 Georgia,serif;margin:0}
+h1 small{display:block;font:400 13px "Segoe UI",sans-serif;opacity:.75}
+h2{font:600 22px/1.3 Georgia,serif;margin:0 0 12px}
+h3{margin:0 0 8px;font-size:16px}
+#auth{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+nav{display:flex;flex-wrap:wrap;gap:4px;padding:0 24px;background:var(--card);border-bottom:1px solid var(--line)}
+nav button{border:0;background:none;padding:12px 16px;font:inherit;color:var(--muted);cursor:pointer;border-bottom:3px solid transparent;border-radius:0}
+nav button.on{color:var(--ink);border-bottom-color:var(--primary);font-weight:600}
+main{max-width:1150px;margin:0 auto;padding:20px 24px 60px}
+#msg{min-height:24px;margin-bottom:8px;font-weight:600}
+#msg.ok{color:var(--good)}#msg.bad{color:var(--bad)}
+input,select,button,textarea{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--ink)}
+header input{border-color:transparent}
+input[type=checkbox]{padding:0}
+button{cursor:pointer}
+button.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+button.danger{color:var(--bad);border-color:var(--bad)}
+:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+.form{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 14px;align-items:center}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin:12px 0}
+.scroll{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:8px;margin-bottom:12px}
+table{border-collapse:collapse;width:100%}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+td.wrap{white-space:normal;min-width:260px}
+th{background:#f6f8fb;font-weight:600;color:var(--muted)}
+td button{margin-right:4px;padding:3px 8px}
+.muted{color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}
+.card b{display:block;font:600 26px/1.1 Georgia,serif}
+.card span{color:var(--muted);font-size:13px}
+.card.bad b{color:var(--bad)}.card.warn b{color:var(--warn)}
+@media print{header,nav,.form,#msg,td button,.noprint{display:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Library Book Lending System<small>MBASH – Unit I Library</small></h1>
+  <div id="auth"></div>
+</header>
+<nav id="tabs"></nav>
+<main>
+  <div id="msg" role="status"></div>
+  <div id="view"></div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const enc = encodeURIComponent;
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = v => typeof v === 'string' && /^\d{4}-\d\d-\d\dT/.test(v) ? v.slice(0, 10) : v;
+
+let session = JSON.parse(sessionStorage.getItem('session') || 'null');
+const role = () => session?.role;
+const isLib = () => role() === 'Librarian';
+const isAdmin = () => role() === 'Administrator';
+const canOperate = () => ['Librarian', 'LRCoordinator'].includes(role());
+const canReport = () => ['Librarian', 'Administrator'].includes(role());
+
+const msg = (t, bad) => { const m = $('#msg'); m.textContent = t || ''; m.className = bad ? 'bad' : 'ok'; };
+const run = fn => async (...a) => { try { await fn(...a); } catch (e) { msg(e.message, true); } };
+
+async function api(path, method = 'GET', body) {
+  const res = await fetch('/api/' + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(session ? { Authorization: 'Bearer ' + session.token } : {}) },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (res.status === 401 && session && path !== 'auth/login') { logout(); throw new Error('Your session expired. Please log in again.'); }
+  if (res.status === 403) throw new Error('Your role is not allowed to do this.');
+  if (res.status === 204) return null;
+  const d = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(d?.detail || (d?.errors && Object.values(d.errors).flat().join(' ')) || d?.title || 'Request failed.');
+  return d;
+}
+
+function table(rows, actions) {
+  if (!rows.length) return '<p class="muted">No records found.</p>';
+  const cols = Object.keys(rows[0]);
+  return '<div class="scroll"><table><tr>' + cols.map(c => `<th>${esc(c)}</th>`).join('') + (actions ? '<th class="noprint"></th>' : '') + '</tr>' +
+    rows.map(r => '<tr>' + cols.map(c => `<td${c === 'Message' ? ' class="wrap"' : ''}>${esc(fmt(r[c]))}</td>`).join('') + (actions ? `<td class="noprint">${actions(r)}</td>` : '') + '</tr>').join('') +
+    '</table></div>';
+}
+const cap = rows => rows.map(r => Object.fromEntries(Object.entries(r).map(([k, v]) => [k[0].toUpperCase() + k.slice(1), v])));
+const readFile = sel => new Promise((res, rej) => {
+  const f = $(sel).files[0];
+  if (!f) return rej(new Error('Choose a CSV file first.'));
+  const r = new FileReader();
+  r.onload = () => res(r.result);
+  r.onerror = () => rej(new Error('Could not read the file.'));
+  r.readAsText(f);
+});
+function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url);
+}
+const downloadText = (name, text) => saveBlob(new Blob([text], { type: 'text/csv' }), name);
+const downloadApi = run(async (path, name) => {
+  const res = await fetch('/api/' + path, { headers: { Authorization: 'Bearer ' + session.token } });
+  if (!res.ok) throw new Error('Download failed.');
+  saveBlob(await res.blob(), name);
+});
+const importSummary = r => `<div class="panel"><b>${r.added} added, ${r.skipped} skipped.</b>` +
+  (r.messages.length ? '<ul>' + r.messages.map(m => `<li>${esc(m)}</li>`).join('') + '</ul>' : '') + '</div>';
+
+/* ---------- login and tabs ---------- */
+function renderAuth() {
+  $('#auth').innerHTML = session
+    ? `<span>${esc(session.fullName)} (${esc(session.role)})</span><button onclick="logout()">Log out</button>`
+    : `<input id="u" placeholder="Username" autocomplete="username"><input id="p" type="password" placeholder="Password" autocomplete="current-password"><button class="primary" onclick="login()">Log in</button>`;
+  const tabs = [['catalog', 'Catalog']];
+  if (session) tabs.push(['dashboard', 'Dashboard'], ['members', 'Members'], ['lending', 'Lending']);
+  if (canReport()) tabs.push(['reports', 'Reports']);
+  if (session) tabs.push(['account', 'Account']);
+  $('#tabs').innerHTML = tabs.map(t => `<button id="t-${t[0]}" onclick="go('${t[0]}')">${t[1]}</button>`).join('');
+}
+const login = run(async () => {
+  session = await api('auth/login', 'POST', { username: $('#u').value, password: $('#p').value });
+  sessionStorage.setItem('session', JSON.stringify(session));
+  renderAuth(); go('dashboard'); msg('Welcome, ' + session.fullName + '.');
+});
+function logout() { session = null; sessionStorage.removeItem('session'); renderAuth(); go('catalog'); }
+const views = { catalog: viewCatalog, dashboard: viewDashboard, members: viewMembers, lending: viewLending, reports: viewReports, account: viewAccount };
+function go(v) {
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.id === 't-' + v));
+  run(views[v])();
+}
+
+/* ---------- catalog ---------- */
+let editId = null, booksById = {}, cf = { q: '', category: '', avail: false, wd: false };
+async function viewCatalog() {
+  editId = null;
+  const [books, cats] = await Promise.all([
+    api(`books?q=${enc(cf.q)}&category=${enc(cf.category)}&availableOnly=${cf.avail}&includeWithdrawn=${cf.wd}`),
+    api('books/categories')]);
+  booksById = Object.fromEntries(books.map(b => [b.id, b]));
+  $('#view').innerHTML = `<h2>Catalog</h2>
+    <div class="form"><input id="q" placeholder="Search title, author, category or shelf" value="${esc(cf.q)}" size="30">
+      <select id="cat"><option value="">All categories</option>${cats.map(c => `<option${c === cf.category ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <label><input id="av" type="checkbox"${cf.avail ? ' checked' : ''}> Available only</label>
+      ${session ? `<label><input id="wd" type="checkbox"${cf.wd ? ' checked' : ''}> Show withdrawn</label>` : ''}
+      <button class="primary" onclick="applyCatalog()">Search</button></div>` +
+    (session ? '' : '<p class="muted">Students can search without logging in. Staff: log in at the top right.</p>') +
+    (canOperate() ? `<details class="panel"><summary><b>Add a book</b></summary><div class="form">
+      <input id="bt" placeholder="Title"><input id="ba" placeholder="Author"><input id="bc" placeholder="Category">
+      <input id="by" type="number" placeholder="Year published"><input id="bh" placeholder="Shelf (e.g. A-1)" size="10">
+      <input id="bn" type="number" min="1" placeholder="Copies"><input id="bd" type="number" min="0" value="0" title="Damaged copies">
+      <input id="bo" placeholder="Condition note" size="20">
+      <button class="primary" onclick="saveBook()">Save book</button><button onclick="go('catalog')">Clear</button></div></details>
+      <details class="panel"><summary><b>Import old records (CSV)</b></summary><div class="form">
+      <input id="bf-file" type="file" accept=".csv,text/csv"><button class="primary" onclick="importBooks()">Import books</button>
+      <button onclick="downloadText('books-template.csv','Title,Author,Category,PublicationYear,Copies,ShelfLocation\nNoli Me Tangere,Jose Rizal,Literature,2015,3,A-1\n')">Download template</button></div></details>
+      <div id="imp"></div>` : '') +
+    (session ? '<div class="form"><button onclick="downloadApi(\'books/export\',\'library-inventory.csv\')">Export inventory (CSV)</button></div>' : '') +
+    table(books.map(b => ({ Id: b.id, Title: b.title, Author: b.author, Category: b.category, Year: b.publicationYear, Shelf: b.shelfLocation,
+      Copies: b.totalCopies, Available: b.availableCopies, Damaged: b.damagedCopies, Condition: b.condition,
+      Status: b.status === 'Withdrawn' ? 'Withdrawn: ' + b.withdrawnReason : 'Active', Outdated: b.isOutdated ? 'Yes' : '' })),
+      canOperate() ? r => `<button onclick="editBook(${r.Id})">Edit</button>` +
+        (isLib() ? (booksById[r.Id].status === 'Withdrawn' ? `<button onclick="restoreBook(${r.Id})">Restore</button>` : `<button onclick="withdrawBook(${r.Id})">Withdraw</button>`) +
+          `<button class="danger" onclick="delBook(${r.Id})">Delete</button>` : '') : null);
+}
+const applyCatalog = run(async () => {
+  cf = { q: $('#q').value, category: $('#cat').value, avail: $('#av').checked, wd: $('#wd')?.checked || false };
+  await viewCatalog();
+});
+function editBook(id) {
+  const b = booksById[id]; editId = id;
+  document.querySelector('details.panel').open = true;
+  $('#bt').value = b.title; $('#ba').value = b.author; $('#bc').value = b.category; $('#by').value = b.publicationYear;
+  $('#bh').value = b.shelfLocation; $('#bn').value = b.totalCopies; $('#bd').value = b.damagedCopies; $('#bo').value = b.conditionNote;
+  msg('Editing book #' + id + '. Change the fields and press Save book.');
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+const saveBook = run(async () => {
+  const body = { title: $('#bt').value, author: $('#ba').value, category: $('#bc').value, publicationYear: +$('#by').value,
+    shelfLocation: $('#bh').value, totalCopies: +$('#bn').value, damagedCopies: +$('#bd').value, conditionNote: $('#bo').value };
+  await (editId ? api('books/' + editId, 'PUT', body) : api('books', 'POST', body));
+  await viewCatalog(); msg('Book saved.');
+});
+const withdrawBook = run(async id => {
+  const reason = prompt('Why is this book withdrawn? (Outdated, Duplicate, Damaged, Donated, Lost, Other)', 'Outdated');
+  if (!reason) return;
+  await api(`books/${id}/withdraw`, 'POST', { reason: reason.trim() }); await viewCatalog(); msg('Book withdrawn from the collection.');
+});
+const restoreBook = run(async id => { await api(`books/${id}/restore`, 'POST'); await viewCatalog(); msg('Book restored.'); });
+const delBook = run(async id => {
+  if (!confirm('Delete this book? Books with lending records cannot be deleted.')) return;
+  await api('books/' + id, 'DELETE'); await viewCatalog(); msg('Book deleted.');
+});
+const importBooks = run(async () => {
+  const r = await api('books/import', 'POST', { csv: await readFile('#bf-file') });
+  await viewCatalog(); $('#imp').innerHTML = importSummary(r); msg('Import finished.');
+});
+
+/* ---------- dashboard ---------- */
+async function viewDashboard() {
+  const d = await api('reports/dashboard');
+  const c = (label, v, cls = '') => `<div class="card ${cls}"><b>${esc(v)}</b><span>${label}</span></div>`;
+  $('#view').innerHTML = `<h2>Dashboard</h2><div class="cards">
+    ${c('Book titles', d.titles)}${c('Copies owned', d.copies)}${c('Copies available now', d.available)}
+    ${c('Books borrowed now', d.borrowedNow)}${c('Overdue books', d.overdueNow, d.overdueNow ? 'bad' : '')}
+    ${c('Damaged copies', d.damagedCopies, d.damagedCopies ? 'warn' : '')}${c('Outdated titles (10+ years)', d.outdatedTitles, d.outdatedTitles ? 'warn' : '')}
+    ${c('Withdrawn titles', d.withdrawnTitles)}${c('Active borrowers', d.activeMembers)}${c('Transactions today', d.transactionsToday)}
+    ${c('Unpaid fines (PHP)', d.unpaidFines.toFixed(2), d.unpaidFines > 0 ? 'bad' : '')}</div>
+    <p class="muted">Use the Catalog tab to search books and see which are available, the Lending tab for borrowing and returning, and Reports for the lists the school head needs.</p>`;
+}
+
+/* ---------- members ---------- */
+let membersById = {}, mq = '';
+async function viewMembers() {
+  const members = await api('members?q=' + enc(mq));
+  membersById = Object.fromEntries(members.map(m => [m.id, m]));
+  $('#view').innerHTML = `<h2>Members</h2>
+    <div class="form"><input id="q" placeholder="Search name, card number or section" value="${esc(mq)}" size="32">
+    <button class="primary" onclick="searchMembers()">Search</button></div>` +
+    (isLib() ? `<details class="panel"><summary><b>Register a borrower</b></summary><div class="form">
+      <input id="mc" placeholder="Library card no."><input id="mn" placeholder="Full name"><input id="mg" placeholder="Grade and section"><input id="mt" placeholder="Contact number">
+      <button class="primary" onclick="addMember()">Save borrower</button></div></details>
+      <details class="panel"><summary><b>Import borrowers (CSV)</b></summary><div class="form">
+      <input id="mf-file" type="file" accept=".csv,text/csv"><button class="primary" onclick="importMembers()">Import borrowers</button>
+      <button onclick="downloadText('borrowers-template.csv','LibraryCardNo,FullName,GradeSection,ContactNumber\nMBASH-0100,Ana Reyes,Grade 7 - Narra,09170000100\n')">Download template</button></div></details>
+      <div id="imp"></div>` : '') +
+    table(members.map(m => ({ Id: m.id, Card: m.libraryCardNo, Name: m.fullName, Section: m.gradeSection, Contact: m.contactNumber, Active: m.isActive ? 'Yes' : 'No' })),
+      r => `<button onclick="showHistory(${r.Id})">History</button>` +
+        (isLib() ? `<button onclick="toggleMember(${r.Id})">${r.Active === 'Yes' ? 'Deactivate' : 'Activate'}</button><button class="danger" onclick="delMember(${r.Id})">Delete</button>` : '')) +
+    '<div id="hist"></div>';
+}
+const searchMembers = run(async () => { mq = $('#q').value; await viewMembers(); });
+const addMember = run(async () => {
+  await api('members', 'POST', { libraryCardNo: $('#mc').value, fullName: $('#mn').value, gradeSection: $('#mg').value || null, contactNumber: $('#mt').value || null, isActive: true });
+  await viewMembers(); msg('Borrower saved.');
+});
+const toggleMember = run(async id => {
+  const m = membersById[id];
+  await api('members/' + id, 'PUT', { libraryCardNo: m.libraryCardNo, fullName: m.fullName, gradeSection: m.gradeSection, contactNumber: m.contactNumber, isActive: !m.isActive });
+  await viewMembers();
+});
+const delMember = run(async id => {
+  if (!confirm('Delete this borrower? Borrowers with lending records cannot be deleted.')) return;
+  await api('members/' + id, 'DELETE'); await viewMembers(); msg('Borrower deleted.');
+});
+const importMembers = run(async () => {
+  const r = await api('members/import', 'POST', { csv: await readFile('#mf-file') });
+  await viewMembers(); $('#imp').innerHTML = importSummary(r); msg('Import finished.');
+});
+const showHistory = run(async id => {
+  const loans = await api('loans/member/' + id);
+  $('#hist').innerHTML = `<h3>Borrowing history: ${esc(membersById[id].fullName)}</h3>` +
+    table(loans.map(l => ({ Book: l.bookTitle, Borrowed: l.loanDate, Due: l.dueDate, Returned: l.returnDate, Renewals: l.renewalCount, Fine: l.fineAmount.toFixed(2), Paid: l.fineAmount > 0 ? (l.finePaid ? 'Yes' : 'No') : '', Status: l.status })));
+});
+
+/* ---------- lending ---------- */
+let lastLoan = null;
+async function viewLending() {
+  const [loans, books, members] = await Promise.all([api('loans?activeOnly=true'), api('books?availableOnly=true'), api('members')]);
+  let fines = [];
+  if (canOperate()) fines = await api('loans/unpaid-fines');
+  $('#view').innerHTML = '<h2>Lending</h2>' + (canOperate() ? `<div class="panel"><h3>Borrow a book</h3><div class="form">
+    <select id="lb">${books.filter(b => b.availableCopies > 0).map(b => `<option value="${b.id}">${esc(b.title)} – shelf ${esc(b.shelfLocation)} (${b.availableCopies} available)</option>`).join('')}</select>
+    <select id="lm">${members.filter(m => m.isActive).map(m => `<option value="${m.id}">${esc(m.fullName)} – ${esc(m.libraryCardNo)}</option>`).join('')}</select>
+    <button class="primary" onclick="borrow()">Borrow</button></div><div id="receipt"></div></div>` : '') +
+    '<h3>Books currently out</h3>' +
+    table(loans.map(l => ({ Id: l.id, Book: l.bookTitle, Borrower: l.memberName, Borrowed: l.loanDate, Due: l.dueDate, Renewals: l.renewalCount, Status: l.status })),
+      canOperate() ? r => `<button onclick="giveBack(${r.Id},'Good')">Return</button><button onclick="giveBack(${r.Id},'Damaged')">Return damaged</button>` +
+        `<button onclick="giveBack(${r.Id},'Lost')">Lost</button><button onclick="renew(${r.Id})">Renew</button>` : null) +
+    (canOperate() ? '<h3>Unpaid fines</h3>' + table(fines.map(l => ({ Id: l.id, Borrower: l.memberName, Book: l.bookTitle, Returned: l.returnDate, Fine: l.fineAmount.toFixed(2) })),
+      r => `<button onclick="payFine(${r.Id})">Mark as paid</button>`) +
+      `<h3>Reminders</h3><div class="form"><button onclick="showReminders()">Show due soon and overdue</button></div><div id="rem"></div>` : '');
+}
+const borrow = run(async () => {
+  lastLoan = await api('loans', 'POST', { bookId: +$('#lb').value, memberId: +$('#lm').value });
+  await viewLending();
+  $('#receipt').innerHTML = `<p><b>Borrowed.</b> "${esc(lastLoan.bookTitle)}" for ${esc(lastLoan.memberName)}, due ${fmt(lastLoan.dueDate)}. <button onclick="printReceipt()">Print receipt</button></p>`;
+  msg('Book lent.');
+});
+function printReceipt() {
+  const l = lastLoan; if (!l) return;
+  const w = window.open('', '_blank', 'width=420,height=560');
+  if (!w) { msg('Allow pop-ups to print the receipt.', true); return; }
+  w.document.write(`<!doctype html><title>Borrowing receipt</title><body style="font:14px Segoe UI,sans-serif;padding:20px;max-width:360px">
+    <h3 style="margin:0">MBASH – Unit I Library</h3><p style="margin:2px 0 12px">Borrowing receipt no. ${l.id}</p><hr>
+    <p><b>Borrower:</b> ${esc(l.memberName)}<br><b>Book:</b> ${esc(l.bookTitle)}<br><b>Borrowed:</b> ${fmt(l.loanDate)}<br><b>Due date:</b> ${fmt(l.dueDate)}</p><hr>
+    <p style="font-size:12px">Please return the book on or before the due date. Late returns are fined after the grace period.</p>`);
+  w.document.close(); w.focus(); w.print();
+}
+const giveBack = run(async (id, condition) => {
+  if (condition === 'Lost' && !confirm('Record this copy as lost? It will be removed from the collection count.')) return;
+  const l = await api(`loans/${id}/return`, 'POST', { condition });
+  await viewLending();
+  msg(`Returned as ${condition}.` + (l.fineAmount > 0 ? ` Fine: ₱${l.fineAmount.toFixed(2)}.` : ' No fine.'));
+});
+const renew = run(async id => { const l = await api(`loans/${id}/renew`, 'POST'); await viewLending(); msg('Renewed. New due date: ' + fmt(l.dueDate) + '.'); });
+const payFine = run(async id => { await api(`loans/${id}/pay-fine`, 'POST'); await viewLending(); msg('Fine recorded as paid.'); });
+const showReminders = run(async () => {
+  const rows = cap(await api('reports/reminders'));
+  $('#rem').innerHTML = table(rows, r => `<button onclick="copyText(${r.LoanId})">Copy message</button>`);
+  window.remindersById = Object.fromEntries(rows.map(r => [r.LoanId, r.Message]));
+});
+const copyText = run(async id => { await navigator.clipboard.writeText(window.remindersById[id]); msg('Message copied. Paste it into a text message or chat.'); });
+
+/* ---------- reports ---------- */
+const reportList = [['borrowers-log', 'Borrowers log'], ['usage', 'Library use per day'], ['overdue', 'Overdue books'], ['fines', 'Fines'],
+  ['collection-review', 'Collection review'], ['duplicates', 'Possible duplicates'], ['withdrawn', 'Withdrawn books'],
+  ['shelf-list', 'Shelf list'], ['audit-log', 'Audit log']];
+async function viewReports() {
+  $('#view').innerHTML = `<h2>Reports</h2><div class="form">From <input id="rf" type="date"> To <input id="rt" type="date"> <span class="muted">(dates apply to the borrowers log and library use)</span></div>
+    <div class="form">${reportList.map(r => `<button onclick="rep('${r[0]}','${r[1]}')">${r[1]}</button>`).join('')}<button onclick="window.print()">Print</button></div><div id="out"></div>`;
+}
+const rep = run(async (name, title) => {
+  const p = new URLSearchParams();
+  if ($('#rf').value) p.set('from', $('#rf').value);
+  if ($('#rt').value) p.set('to', $('#rt').value);
+  const rows = await api('reports/' + name + '?' + p);
+  $('#out').innerHTML = `<h3>${esc(title)}</h3>` + table(cap(rows));
+  msg('');
+});
+
+/* ---------- account ---------- */
+async function viewAccount() {
+  let html = `<h2>Account</h2><div class="panel"><h3>Change my password</h3><div class="form">
+    <input id="pc" type="password" placeholder="Current password" autocomplete="current-password"><input id="pn" type="password" placeholder="New password (8+ characters, letter and number)" size="36" autocomplete="new-password">
+    <button class="primary" onclick="changePassword()">Change password</button></div></div>`;
+  if (canReport()) html += `<div class="panel"><h3>Backup</h3><p class="muted">Saves a full copy of the database (.bak) in the backup folder set in appsettings.json.</p>
+    <button class="primary" onclick="backup()">Back up the database now</button></div>`;
+  if (isAdmin()) {
+    const users = await api('users');
+    html += `<h3>Staff accounts</h3><div class="panel"><div class="form"><input id="nu" placeholder="Username"><input id="nf" placeholder="Full name">
+      <select id="nr"><option>Librarian</option><option>LRCoordinator</option><option>Administrator</option></select><input id="np" type="password" placeholder="Password" autocomplete="new-password">
+      <button class="primary" onclick="addUser()">Create account</button></div></div>` +
+      table(users.map(u => ({ Id: u.id, Username: u.username, Name: u.fullName, Role: u.role, Active: u.isActive ? 'Yes' : 'No' })),
+        r => `<button onclick="resetPw(${r.Id})">Reset password</button><button onclick="setActive(${r.Id},${r.Active === 'Yes' ? 'false' : 'true'})">${r.Active === 'Yes' ? 'Disable' : 'Enable'}</button>`);
+  }
+  $('#view').innerHTML = html;
+}
+const changePassword = run(async () => {
+  await api('auth/change-password', 'POST', { currentPassword: $('#pc').value, newPassword: $('#pn').value });
+  $('#pc').value = ''; $('#pn').value = ''; msg('Password changed.');
+});
+const backup = run(async () => { const r = await api('admin/backup', 'POST'); msg('Backup saved: ' + r.file); });
+const addUser = run(async () => {
+  await api('users', 'POST', { username: $('#nu').value, fullName: $('#nf').value, role: $('#nr').value, password: $('#np').value });
+  await viewAccount(); msg('Account created.');
+});
+const resetPw = run(async id => {
+  const pw = prompt('New password (8+ characters with a letter and a number):'); if (!pw) return;
+  await api(`users/${id}/reset-password`, 'POST', { newPassword: pw }); msg('Password reset.');
+});
+const setActive = run(async (id, isActive) => { await api(`users/${id}/active?isActive=${isActive}`, 'PUT'); await viewAccount(); msg('Account updated.'); });
+
+renderAuth();
+go('catalog');
+</script>
+</body>
+</html>
